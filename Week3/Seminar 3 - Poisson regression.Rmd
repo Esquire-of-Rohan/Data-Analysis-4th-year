@@ -1,0 +1,308 @@
+---
+title: "Count Data Regression: Poisson Regression and Extensions"
+author: "Workshop Materials"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 5
+)
+```
+
+# Introduction
+
+This workshop covers regression methods for count data. The material is based on the `pscl` package vignette: <https://cran.r-project.org/web/packages/pscl/vignettes/countreg.pdf>
+
+**Main topics:**
+
+- Poisson regression
+- Overdispersion
+- Quasi-Poisson regression
+- Negative binomial regression
+- Model diagnostics
+
+# Loading Data and Packages
+
+```{r load-packages}
+library(sjPlot)
+library(mfx)
+library(vcd)
+library(MASS)
+```
+
+## Loading the Data
+
+The `DebTrivedi` dataset (Deb & Trivedi, 1997) contains data on 4406 individuals aged 66 and over who are covered by Medicare. We download it from GitHub (CRAN mirror of the pscl package):
+
+```{r load-data}
+# Download DebTrivedi data from pscl package on GitHub
+temp_file <- tempfile(fileext = ".rda")
+download.file(
+  url = "https://github.com/cran/pscl/raw/master/vignettes/DebTrivedi.rda",
+  destfile = temp_file,
+  mode = "wb",
+  quiet = TRUE
+)
+load(temp_file)
+unlink(temp_file)
+
+# Select variables for analysis
+dt <- DebTrivedi[, c(1, 6:8, 13, 15, 18)]
+
+```
+
+## Data Description
+
+Y ~ Poisson(lamda_i)
+
+log(lamda)
+
+```{r data-structure}
+str(dt)
+head(dt)
+
+
+```
+
+**Variables:**
+
+- `ofp` — number of physician office visits (outcome variable)
+- `numchron` — number of chronic conditions
+- `health` — self-perceived health status
+- `privins` — private insurance indicator
+- `hosp` — number of hospital stays
+- `gender` — gender
+- `school` — number of years of education
+
+# Exploratory Data Analysis
+
+## Distribution of the Outcome Variable
+
+```{r eda-distribution}
+plot(table(dt$ofp), 
+     main = "Distribution of Physician Office Visits",
+     xlab = "Number of visits (ofp)",
+     ylab = "Frequency")
+```
+
+## Checking for Overdispersion
+
+For a Poisson distribution, the mean equals the variance. Let's check:
+
+```{r eda-overdispersion}
+mean(dt$ofp)
+var(dt$ofp)
+```
+
+**Conclusion:** The variance (`r round(var(dt$ofp), 2)`) is much larger than the mean (`r round(mean(dt$ofp), 2)`), indicating **overdispersion**.
+
+## Helper Functions for Visualization
+
+```{r helper-functions}
+# Continuity-corrected logarithm for zero counts
+clog <- function(x) log(x + 0.5)
+
+# Transform count variable to factor for visualization
+cfac <- function(x, breaks = NULL) {
+  if(is.null(breaks)) breaks <- unique(quantile(x, 0:10/10))
+  x <- cut(x, breaks, include.lowest = TRUE, right = FALSE)
+  levels(x) <- paste(breaks[-length(breaks)], 
+                     ifelse(diff(breaks) > 1,
+                            c(paste("-", breaks[-c(1, length(breaks))] - 1, sep = ""), "+"), 
+                            ""), 
+                     sep = "")
+  return(x)
+}
+```
+
+## Relationship with Predictors
+
+```{r eda-predictors, fig.height=10}
+par(mfrow = c(3, 2))
+
+plot(clog(ofp) ~ cfac(numchron), data = dt,
+     main = "Visits ~ Chronic Conditions",
+     xlab = "Number of chronic conditions",
+     ylab = "log(ofp + 0.5)")
+
+plot(clog(ofp) ~ health, data = dt, varwidth = TRUE,
+     main = "Visits ~ Self-Perceived Health",
+     xlab = "Health status",
+     ylab = "log(ofp + 0.5)")
+
+plot(clog(ofp) ~ privins, data = dt, varwidth = TRUE,
+     main = "Visits ~ Private Insurance",
+     xlab = "Private insurance",
+     ylab = "log(ofp + 0.5)")
+
+plot(clog(ofp) ~ cfac(hosp, c(0:2, 8)), data = dt,
+     main = "Visits ~ Hospital Stays",
+     xlab = "Number of hospital stays",
+     ylab = "log(ofp + 0.5)")
+
+plot(clog(ofp) ~ gender, data = dt, varwidth = TRUE,
+     main = "Visits ~ Gender",
+     xlab = "Gender",
+     ylab = "log(ofp + 0.5)")
+
+plot(cfac(ofp, c(0:2, 4, 6, 10, 100)) ~ school, data = dt, breaks = 9,
+     main = "Visits ~ Education",
+     xlab = "Years of education",
+     ylab = "Visit categories")
+
+par(mfrow = c(1, 1))
+```
+
+# Poisson Regression
+
+## Model Fitting
+
+```{r poisson-model}
+fm_pois <- glm(ofp ~ ., data = dt, family = poisson)
+summary(fm_pois)
+```
+
+## Interpreting Coefficients
+
+Poisson regression coefficients are on the log scale. Exponentiate for multiplicative effects:
+
+```{r poisson-exp-coef}
+exp(coef(fm_pois))
+```
+
+## Visualizing Results
+
+```{r poisson-table}
+tab_model(fm_pois)
+```
+
+```{r poisson-table-log}
+# Coefficients on log scale
+tab_model(fm_pois, transform = NULL)
+```
+
+## Predicted Values
+
+```{r poisson-predictions, fig.height=10}
+plot_model(fm_pois, type = "pred")
+```
+
+```{r poisson-effects, fig.height=10}
+# Predicted values at mean levels of other variables
+plot_model(fm_pois, type = 'eff')
+```
+
+## Marginal Effects
+
+```{r marginal-effects}
+poissonmfx(ofp ~ ., data = dt)
+
+
+```
+
+# Model Diagnostics
+
+## Goodness of Fit for Poisson Distribution
+
+```{r diagnostics-goodfit}
+fit <- goodfit(dt$ofp, type = "poisson")
+summary(fit)
+```
+
+```{r diagnostics-rootogram}
+rootogram(fit)
+```
+
+## Distribution Plots
+
+```{r diagnostics-distplot, fig.height=8}
+par(mfrow = c(1, 2))
+distplot(dt$ofp, type = "poisson", main = "Poisson")
+distplot(dt$ofp, type = "nbinom", main = "Negative Binomial")
+par(mfrow = c(1, 1))
+```
+
+## Analysis of Deviance
+
+```{r diagnostics-anova}
+anova(fm_pois, test = "Chisq")
+```
+
+# Quasi-Poisson Regression
+
+To account for overdispersion, we use the quasi-Poisson model:
+
+```{r quasipoisson-model}
+fm_qpois <- glm(ofp ~ ., data = dt, family = quasipoisson)
+summary(fm_qpois)
+```
+
+**Interpretation:** The estimated dispersion parameter φ̂ = `r round(summary(fm_qpois)$dispersion, 3)`, which is clearly larger than 1, confirming overdispersion in the data.
+
+# Negative Binomial Regression
+
+An alternative approach to modeling overdispersion:
+
+```{r negbin-model}
+fm_nbin <- glm.nb(ofp ~ ., data = dt)
+summary(fm_nbin)
+```
+
+## Model Comparison
+
+```{r model-comparison}
+# Create comparison table
+comparison <- data.frame(
+  Model = c("Poisson", "Quasi-Poisson", "Negative Binomial"),
+  AIC = c(AIC(fm_pois), NA, AIC(fm_nbin)),
+  Dispersion = c(1, summary(fm_qpois)$dispersion, fm_nbin$theta)
+)
+knitr::kable(comparison, digits = 2,
+             caption = "Comparison of Count Data Models")
+```
+
+**Note:** The quasi-Poisson model does not have a formal likelihood, so AIC is not available.
+
+# Coefficient Comparison
+
+```{r coef-comparison}
+coef_comparison <- data.frame(
+  Poisson = coef(fm_pois),
+  QuasiPoisson = coef(fm_qpois),
+  NegBin = coef(fm_nbin)
+)
+knitr::kable(round(coef_comparison, 4),
+             caption = "Coefficient Comparison Across Models")
+```
+
+# Conclusions
+
+1. **Overdispersion** is confirmed: variance greatly exceeds the mean
+2. **Poisson regression** underestimates standard errors when overdispersion is present
+3. **Quasi-Poisson** and **negative binomial** regression yield similar results
+4. **Negative binomial model** is preferred as it allows for model selection criteria (AIC, BIC)
+
+# Additional Resources
+
+- [UCLA: Poisson Regression](https://stats.oarc.ucla.edu/r/dae/poisson-regression/)
+- [CRAN: pscl vignette](https://cran.r-project.org/web/packages/pscl/vignettes/countreg.pdf)
+- [Diagnostic plots for count regression](https://stats.stackexchange.com/questions/70558/diagnostic-plots-for-count-regression)
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

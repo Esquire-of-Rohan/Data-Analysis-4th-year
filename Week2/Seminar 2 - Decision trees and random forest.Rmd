@@ -1,0 +1,507 @@
+---
+title: "Workshop: Decision Trees and Random Forests"
+subtitle: "Predictive Modeling with TIMSS Singapore Data"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# Introduction
+
+This workshop covers tree-based machine learning methods for predicting student mathematics achievement using TIMSS (Trends in International Mathematics and Science Study) data from Singapore. We will explore:
+
+- Conditional Inference Trees (ctree)
+- Classification and Regression Trees (CART)
+- Random Forests
+
+---
+
+# Part 1: Data Preparation
+
+## 1.1 Loading Required Libraries
+
+```{r load-libraries}
+library(foreign)
+library(dplyr)
+```
+
+## 1.2 Reading and Selecting Variables
+
+```{r load-data}
+sgp1 <- read.spss("BSGSGPM6.sav", to.data.frame = TRUE)
+
+
+sgp <- sgp1 %>% 
+  dplyr::select(
+    BSMMAT01, ITSEX, BSBGSCM, BSDGSCM, BSBG04, BSBG07A, BSBG07B, 
+    BSBGSB, BSBGSSB, BSBG06A, BSBG06B, BSBG06C, BSBG06D, BSBG06E,
+    BSBG06F, BSBG06G
+  )
+
+
+head(sgp)
+```
+
+## 1.3 Renaming Variables
+
+```{r rename-vars}
+lookup <- c(
+  math = "BSMMAT01", 
+  sex = "ITSEX", 
+  selfconf = "BSBGSCM", 
+  selfconf_factor = "BSDGSCM",
+  books = "BSBG04",
+  edumom = "BSBG07A", 
+  edudad = "BSBG07B", 
+  bullying = "BSBGSB", 
+  belonging = "BSBGSSB", 
+  PC = "BSBG06A", 
+  PCshared = "BSBG06B", 
+  desk = "BSBG06C",
+  room = "BSBG06D", 
+  internet = "BSBG06E", 
+  phone = "BSBG06F",
+  gaming_system = "BSBG06G"
+)
+
+sgp <- rename(sgp, all_of(lookup))
+names(sgp)
+
+sgp
+```
+
+## 1.4 Setting Variable Types
+
+```{r set-types}
+# Numeric variables
+sgp$math <- as.numeric(as.character(sgp$math))
+sgp$selfconf <- as.numeric(as.character(sgp$selfconf))
+sgp$bullying <- as.numeric(as.character(sgp$bullying))
+sgp$belonging <- as.numeric(as.character(sgp$belonging))
+
+# Factor variables
+sgp$selfconf_factor <- as.factor(sgp$selfconf_factor)
+sgp$books <- as.factor(sgp$books)
+sgp$edumom <- as.factor(sgp$edumom)
+sgp$edudad <- as.factor(sgp$edudad)
+
+# Creating binary outcome for classification
+sgp$math_binary <- as.factor(ifelse(sgp$math < mean(sgp$math), 0, 1))
+```
+
+---
+
+# Part 2: Exploratory Data Analysis
+
+## 2.1 Continuous Variables
+
+```{r eda-continuous}
+par(mfrow = c(2, 2))
+hist(sgp$selfconf, main = "Self-Confidence", col = "steelblue", xlab = "Score")
+hist(sgp$math, main = "Math Achievement", col = "steelblue", xlab = "Score")
+hist(sgp$bullying, main = "Bullying Index", col = "steelblue", xlab = "Score")
+hist(sgp$belonging, main = "School Belonging", col = "steelblue", xlab = "Score")
+par(mfrow = c(1, 1))
+```
+
+## 2.2 Categorical Variables
+
+```{r eda-categorical}
+par(mfrow = c(3, 4))
+plot(sgp$selfconf_factor, main = "Self-Confidence (Factor)")
+plot(sgp$books, main = "Books at Home")
+plot(sgp$edumom, main = "Mother's Education")
+plot(sgp$edudad, main = "Father's Education")
+plot(sgp$sex, main = "Sex")
+plot(sgp$PC, main = "Has PC")
+plot(sgp$PCshared, main = "Shared PC")
+plot(sgp$desk, main = "Has Desk")
+plot(sgp$room, main = "Own Room")
+plot(sgp$internet, main = "Internet Access")
+plot(sgp$phone, main = "Has Phone")
+plot(sgp$gaming_system, main = "Gaming System")
+par(mfrow = c(1, 1))
+```
+
+---
+
+# Part 3: Baseline Regression Models
+
+## 3.1 Linear Regression (Continuous Outcome)
+
+```{r linear-regression}
+lm_model <- lm(
+  math ~ sex + edumom + books + selfconf + bullying + belonging +
+    PC + desk + room + internet + phone + gaming_system, 
+  data = sgp
+)
+summary(lm_model)
+```
+
+## 3.2 Logistic Regression (Binary Outcome)
+
+```{r logistic-regression}
+library(nnet)
+library(sjPlot)
+
+glm_model <- glm(
+  math_binary ~ sex + edumom + edudad + books + selfconf + bullying + belonging +
+    PC + PCshared + desk + room + internet + phone + gaming_system, 
+  data = sgp, 
+  family = "binomial"
+)
+
+tab_model(glm_model)
+summary(glm_model)
+```
+
+---
+
+# Part 4: Handling Missing Data
+
+Decision trees typically cannot handle missing values directly. We use Random Forest imputation via the `missForest` package.
+
+```{r imputation}
+set.seed(123)
+library(missForest)
+library(doParallel)
+
+registerDoParallel(cores = 4)
+
+# Impute missing values
+sgp_imputed <- missForest(sgp, parallelize = "forests")
+sgp2 <- sgp_imputed$ximp
+
+# Check imputation results
+summary(sgp2)
+cat("\nOut-of-bag imputation error:\n")
+print(sgp_imputed$OOBerror)
+```
+
+---
+
+# Part 5: Conditional Inference Trees (ctree)
+
+## 5.1 Basic ctree Model
+
+```{r ctree-basic}
+library(partykit)
+
+tree1 <- ctree(
+  math ~ sex + edumom + edudad + books + selfconf + bullying + belonging +
+    PC + desk + room + gaming_system, 
+  data = sgp2
+)
+
+plot(tree1, cex = 0.5)
+print(tree1)
+```
+
+## 5.2 Pre-Pruned ctree
+
+Control tree complexity using `maxdepth` parameter.
+
+```{r ctree-pruned}
+tree1_pruned <- ctree(
+  math ~ sex + edumom + edudad + books + selfconf + bullying + belonging +
+    PC + desk + room + gaming_system, 
+  data = sgp2, 
+  control = ctree_control(maxdepth = 4)
+)
+
+plot(tree1_pruned, cex = 0.5)
+print(tree1_pruned)
+```
+
+## 5.3 Classification ctree (Binary Outcome)
+
+```{r ctree-classification}
+tree2 <- ctree(
+  math_binary ~ sex + edumom + edudad + books + selfconf + bullying + belonging +
+    PC + desk + room + gaming_system, 
+  data = sgp2, 
+  control = ctree_control(maxdepth = 3)
+)
+
+plot(tree2, cex = 0.5)
+print(tree2)
+```
+
+---
+
+# Part 6: CART (Classification and Regression Trees)
+
+## 6.1 Regression Tree
+
+```{r cart-regression}
+library(rpart)
+library(rpart.plot)
+
+fit1 <- rpart(
+  math ~ sex + edumom + edudad + books + bullying + belonging +
+    PC + desk + room + gaming_system + selfconf,
+  data = sgp2,
+  method = "anova"
+)
+
+# Complexity parameter table
+printcp(fit1)
+
+# Detailed split summary
+summary(fit1)
+```
+
+## 6.2 Visualizing CART
+
+```{r cart-visualization}
+# Basic plot
+plot(fit1, uniform = TRUE, main = "Regression Tree for Math Achievement")
+text(fit1, use.n = TRUE, all = TRUE, cex = 0.8)
+
+# Enhanced visualization
+library(rattle)
+library(RColorBrewer)
+
+prp(fit1)
+rpart.plot(fit1, tweak = 1.6)
+
+# Extract decision rules
+rpart.rules(fit1)
+
+# Fancy plot
+fancyRpartPlot(fit1, tweak = 1.6)
+```
+
+## 6.3 Classification Tree
+
+```{r cart-classification}
+fit2 <- rpart(
+  math_binary ~ sex + edumom + edudad + books + selfconf + bullying + belonging +
+    PC + desk + room + gaming_system,
+  data = sgp2,
+  method = "class"
+)
+
+printcp(fit2)
+summary(fit2)
+
+# Visualizations
+prp(fit2)
+fancyRpartPlot(fit2)
+```
+
+## 6.4 Pre-Pruning CART
+
+```{r cart-prepruning}
+fit2_prepruned <- rpart(
+  math_binary ~ sex + edumom + edudad + books + selfconf + bullying + belonging +
+    PC + PCshared + desk + room + internet + phone + gaming_system,
+  data = sgp2,
+  method = "class", 
+  control = rpart.control(minbucket = 1000)
+)
+
+printcp(fit2_prepruned)
+prp(fit2_prepruned)
+```
+
+## 6.5 Post-Pruning CART
+
+```{r cart-postpruning}
+# Find optimal complexity parameter
+optimal_cp <- fit2$cptable[which.min(fit2$cptable[, "xerror"]), "CP"]
+cat("Optimal CP:", optimal_cp, "\n")
+
+# Visual representation of cross-validation error
+plotcp(fit2)
+
+# Prune the tree
+fit2_pruned <- prune(fit2, cp = optimal_cp)
+
+# Plot pruned tree
+prp(fit2_pruned)
+```
+
+---
+
+# Part 7: Random Forest
+
+## 7.1 Building the Random Forest Model
+
+```{r rf-build}
+library(randomForest)
+library(caret)
+set.seed(123)
+ 
+rf <- randomForest(
+  math ~ sex + edumom + edudad + books + bullying + belonging +
+    PC + PCshared + desk + room + internet + phone + gaming_system + selfconf,
+  data = sgp2,
+  importance = TRUE, 
+  nperm = 3
+)
+
+print(rf)
+```
+
+## 7.2 Error Rate by Number of Trees
+
+```{r rf-error}
+plot(rf, main = "Error Rate vs. Number of Trees")
+```
+
+## 7.3 Tree Size Distribution
+
+```{r rf-treesize}
+hist(
+  treesize(rf),
+  main = "Distribution of Tree Sizes in Random Forest",
+  col = "forestgreen",
+  xlab = "Number of Nodes"
+)
+```
+
+## 7.4 Variable Importance
+
+```{r rf-importance}
+# Two types of importance measures
+importance(rf, type = 1)  # Permutation importance
+importance(rf, type = 2)  # Node impurity importance
+
+# Visualization
+par(mfrow = c(1, 2))
+varImpPlot(rf, type = 1, main = "Permutation Importance")
+varImpPlot(rf, type = 2, main = "Node Impurity Importance")
+par(mfrow = c(1, 1))
+```
+
+## 7.5 Explaining the Forest
+
+```{r rf-explain, eval=FALSE}
+#install.packages('randomForestExplainer')
+#install.packages('ggplot2')
+
+
+library(randomForestExplainer)
+explain_forest(rf, interactions = TRUE, data = sgp2)
+```
+
+---
+
+# Part 8: Model Evaluation
+
+## 8.1 In-Sample Prediction
+
+```{r rf-insample}
+# Predict on training data
+p_rf <- predict(rf, newdata = sgp2)
+
+# Residuals
+residuals_rf <- sgp2$math - p_rf
+summary(residuals_rf)
+
+# RMSE
+rmse_insample <- sqrt(sum(residuals_rf^2, na.rm = TRUE) / length(residuals_rf))
+cat("In-sample RMSE:", round(rmse_insample, 2), "\n")
+
+# Actual vs. Predicted plot
+plot(
+  sgp2$math ~ p_rf, 
+  asp = 1, 
+  pch = 20, 
+  xlab = "Fitted Values", 
+  ylab = "Actual Values", 
+  main = "Math Achievement: Actual vs. Fitted (In-Sample)"
+)
+grid()
+abline(0, 1, col = "red", lwd = 2)
+```
+
+## 8.2 Out-of-Bag Cross-Validation
+
+```{r rf-oob}
+# OOB predictions (more realistic assessment)
+p_rf_oob <- predict(rf, type = "response")
+
+# Residuals
+residuals_oob <- sgp2$math - p_rf_oob
+summary(residuals_oob)
+
+# RMSE
+rmse_oob <- sqrt(sum(residuals_oob^2, na.rm = TRUE) / length(residuals_oob))
+cat("Out-of-bag RMSE:", round(rmse_oob, 2), "\n")
+
+# Actual vs. OOB Predicted plot
+plot(
+  sgp2$math ~ p_rf_oob, 
+  asp = 1, 
+  pch = 20,
+  xlab = "Out-of-Bag Cross-Validation Estimates",
+  ylab = "Actual Values",
+  main = "Math Achievement: Actual vs. OOB Predictions"
+)
+grid()
+abline(0, 1, col = "red", lwd = 2)
+```
+
+---
+
+# Tasks
+
+## Task 1: Data Exploration
+
+Examine the imputation results. What percentage of missing data was present in each variable before imputation?
+
+```{r task1, eval=FALSE}
+# Your code here
+```
+
+## Task 2: Tree Interpretation
+
+Using the CART classification tree (fit2), identify the three most important predictors for above-average math performance. Explain the decision rules.
+
+```{r task2, eval=FALSE}
+# Your code here
+```
+
+## Task 3: Hyperparameter Tuning
+
+Experiment with different `maxdepth` values in ctree (3, 4, 5, 6). Which depth provides the best balance between interpretability and predictive accuracy?
+
+```{r task3, eval=FALSE}
+# Your code here
+```
+
+## Task 4: Random Forest Comparison
+
+Compare the permutation importance and node impurity importance rankings. Why might they differ?
+
+```{r task4, eval=FALSE}
+# Your code here
+```
+
+## Task 5: Model Comparison
+
+Compare the RMSE from the linear regression model with the Random Forest OOB RMSE. Which model performs better and why?
+
+```{r task5, eval=FALSE}
+# Your code here
+```
+

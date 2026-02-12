@@ -1,0 +1,466 @@
+---
+title: "Workshop 1: Missing Data Imputation in R"
+author: "Ilya Lyapin"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+set.seed(123)
+```
+
+# Introduction
+
+This workshop covers missing data imputation techniques using the RLMS (Russian Longitudinal Monitoring Survey) 2019 dataset. We will explore:
+
+- Diagnosing missing data patterns
+- Multiple Imputation using the `mi` package
+- Random Forest imputation using `missForest`
+- Comparing different imputation methods
+
+**Reference:** https://www.r-bloggers.com/2023/01/imputation-in-r-top-3-ways-for-imputing-missing-data/
+
+---
+
+# Part 1: Loading and Exploring the Data
+
+## 1.1 Load Required Libraries
+
+```{r load-libraries}
+library(foreign)
+library(dplyr)
+```
+
+## 1.2 Load the Dataset
+
+```{r load-data}
+rlms <- read.spss("rlms2019.sav", to.data.frame = TRUE, use.missings = TRUE)
+
+rlms
+```
+
+## 1.3 Variable Descriptions
+
+The dataset contains the following variables:
+
+| Variable | Description |
+|----------|-------------|
+| idind | ID |
+| marital | Marital status |
+| occup08 | ISCO 08 macrogroups |
+| diplom | Finished level of education |
+| age | Age (full years) |
+| job | Current main occupation status |
+| satisf_job | Job satisfaction |
+| ISCO | ISCO2008 detailed |
+| year_job | Year started at current company |
+| employees | Has subordinates? |
+| hrs_week | Typical hours per week |
+| worked30 | Worked at main job in last 30 days? |
+| salary30 | Received salary in last 30 days? |
+| income | Income from main job after taxes (last 30 days) |
+
+## 1.4 Initial Data Inspection
+
+```{r initial-summary}
+summary(rlms) # All vars identified as factor -> we need some recoding
+```
+
+## 1.5 Convert Variables to Numeric
+
+```{r convert-numeric}
+rlms$age <- as.numeric(rlms$age)
+rlms$year_job <- as.numeric(rlms$year_job)
+rlms$hrs_week <- as.numeric(rlms$hrs_week)
+rlms$income <- as.numeric(rlms$income)
+```
+
+## 1.6 Check Updated Summary
+
+```{r updated-summary}
+summary(rlms)
+```
+
+**Questions to consider:**
+
+- In which variables do we have the most missings?
+- Are there patterns in missingness?
+- Does it make sense to keep all cases or should we create a subsample/recode variables first?
+
+---
+
+# Part 2: Diagnosing Missing Data Patterns
+
+## 2.1 Load the mi Package
+
+```{r load-mi}
+library(mi)
+
+rlms %>% filter(job == 'Unemployed') 
+
+```
+
+## 2.2 Create Missing Data Frame
+
+```{r create-mdf-initial}
+# Convert data_frame into missing_data.frame for more information about data
+# First, let's exclude ISCO as it has way too many categories
+rlms <- rlms[, c(-1, -8)]  # Remove idind and ISCO
+
+mdf <- missing_data.frame(rlms)
+
+mdf
+
+
+```
+
+**IMPORTANT:** Check that each missing_variable is assigned the correct type (binary, factor, numeric).
+
+**NOTE:** If you see a warning about variables having the same missingness pattern, do NOT ignore it - check your data!
+
+## 2.3 Examine the Missing Data Frame
+
+```{r show-mdf}
+show(mdf) 
+# occup08, diplom, satisf_job - should be ordered
+# All numeric vars should be positive-continuous (always > 0)
+```
+
+## 2.4 Change Variable Types
+
+```{r change-types}
+# Change numeric variables to positive-continuous
+mdf <- change(mdf, y = c("age", "year_job", "hrs_week", "income"), 
+              what = "type", to = "positive-continuous")
+show(mdf)
+
+# Change ordered categorical variables
+mdf <- change(mdf, y = c("occup08", "diplom", "satisf_job"), 
+              what = "type", to = "ordered-categorical")
+show(mdf)
+```
+
+## 2.5 Visualize Missing Data Patterns
+
+```{r visualize-missings}
+# Summary statistics
+summary(mdf)
+
+# Histogram of variables
+hist(mdf, variables = c("income", "age", "hrs_week"))
+
+
+# Image plot - look for patterns
+image(mdf)  
+# We see that a bunch of variables have the same pattern of missings. Why?
+```
+
+## 2.6 Investigate Missing Patterns
+
+```{r investigate-patterns}
+# Check job status distribution
+table(rlms$job)  # 6211 unemployed => cannot have income
+
+# Check related variables
+summary(rlms$worked30)  # ~6223 NA's
+summary(rlms$salary30)  # ~6226 NA's
+```
+
+**Decision Point:** We have 2 major options depending on research goals:
+
+1. Recode NA's for unemployed people
+2. Drop unemployed if we're only interested in workforce
+
+Since we're focused on predictors of income, let's create a subset of employed individuals.
+
+---
+
+# Part 3: Data Preparation for Imputation
+
+## 3.1 Filter to Employed Individuals
+
+```{r filter-employed}
+# Keep only those who potentially earn money
+rlms <- rlms %>% filter(job == "Have job" | job == "Paid vacation")
+summary(rlms)
+```
+
+## 3.2 Create Sample for Computational Efficiency
+
+```{r create-sample}
+# Random sample of 3000 observations (for faster computation)
+rlms1 <- rlms[sample(nrow(rlms), 3000), ]
+```
+
+## 3.3 Prepare Missing Data Frame with Correct Types
+
+```{r prepare-mdf-final}
+mdf <- missing_data.frame(rlms1)
+mdf <- change(mdf, y = c("age", "year_job", "hrs_week", "income"), 
+              what = "type", to = "positive-continuous")
+mdf <- change(mdf, y = c("occup08", "diplom", "satisf_job"), 
+              what = "type", to = "ordered-categorical")
+show(mdf)
+image(mdf)  # Should look much better now!
+```
+
+---
+
+# Part 4: Multiple Imputation with mi Package
+
+## 4.1 Set Up Parallel Processing
+
+```{r setup-parallel}
+library(doParallel)
+registerDoParallel(cores = 4)  # Adjust based on your machine
+```
+
+## 4.2 Run Multiple Imputation
+
+**Note:** This is time-consuming. Be prepared!
+
+```{r run-mi, cache=TRUE}
+imputations <- mi(mdf, n.iter = 30, n.chains = 4, max.minutes = 20, parallel = TRUE)
+# chain = new dataset with imputed data
+# We create several chains and compare them
+show(imputations)
+
+
+```
+
+## 4.3 Check Convergence
+
+```{r check-convergence}
+# Verify whether enough iterations were conducted
+# We want the mean of each completed variable to be roughly the same for each chain
+round(mipply(imputations, mean, to.matrix = TRUE), 3)
+
+# Check Rhat values - indicates whether mi converged
+# Around 1.0 = OK, more than 1.1 = run chains longer
+Rhats(imputations)
+```
+
+**If convergence is not achieved:**
+```{r additional-iterations, eval=FALSE}
+# Run more iterations if needed
+imputations <- mi(imputations, n.iter = 5)
+
+Rhats(imputations)
+```
+
+## 4.4 Diagnostic Plots
+
+```{r diagnostic-plots}
+
+
+# Missingness patterns in original and imputed datasets
+image(imputations)
+
+# Detailed info on imputed values
+summary(imputations)
+```
+
+## 4.5 Extract Imputed Datasets
+
+```{r extract-datasets}
+# Extract a list of 4 datasets
+dfs <- complete(imputations, m = 4)
+
+dfs
+```
+
+---
+
+# Part 5: Random Forest Imputation with missForest
+
+## 5.1 Load Package and Check Data
+
+```{r load-missforest}
+library(missForest)
+
+# Always double check variable types and distributions!
+summary(rlms1)
+```
+
+## 5.2 Run missForest Imputation
+
+```{r run-missforest, cache=TRUE}
+registerDoParallel(cores = 4)
+imputed_missForest <- missForest(rlms1, verbose = TRUE, parallelize = "forests")
+```
+
+## 5.3 Examine Results
+
+```{r examine-missforest}
+# The estimated error (OOB = Out-of-Bag)
+imputed_missForest$OOBerror
+
+# View imputed dataset
+View(imputed_missForest$ximp)
+```
+
+## 5.4 Compare Original and Imputed Values
+
+```{r compare-original-imputed}
+# Compare imputed and original income variable
+missForest_imputed <- data.frame(
+  original = rlms1$income,
+  imputed_missForest = imputed_missForest$ximp$income
+)
+View(missForest_imputed)
+```
+
+---
+
+# Part 6: Comparing Imputation Methods
+
+## 6.1 Create Comparison Table
+
+```{r compare-methods}
+# Compare results from both imputation methods
+compare_data <- cbind(
+  original = rlms1$income,
+  missForest = imputed_missForest$ximp$income,
+  mi_chain1 = `chain:1`$income,
+  mi_chain2 = `chain:2`$income,
+  mi_chain3 = `chain:3`$income,
+  mi_chain4 = `chain:4`$income
+)
+View(compare_data)
+```
+
+---
+
+# Part 7: KNN Imputation (Extra - Numeric Variables Only)
+
+**Note:** KNN only works well with numeric and binary variables.
+
+**Data source:** https://archive.ics.uci.edu/dataset/9/auto+mpg
+
+```{r knn-imputation, eval=FALSE}
+# This code is for reference - uncomment to run
+# library(caret)
+# 
+# preProcValues <- preProcess(rlms[,-1],
+#                             method = c("knnImpute"),
+#                             k = 20,
+#                             knnSummary = mean)
+# 
+# impute_rlms_info <- predict(preProcValues, rlms[,-1], na.action = na.pass)
+# 
+# # The imputed data will be normalized. To de-normalize:
+# procNames <- data.frame(
+#   col = names(preProcValues$mean), 
+#   mean = preProcValues$mean, 
+#   sd = preProcValues$std
+# )
+# 
+# for(i in procNames$col) {
+#   impute_rlms_info[i] <- impute_rlms_info[i] * preProcValues$std[i] + preProcValues$mean[i]
+# }
+# 
+# View(impute_rlms_info)
+```
+
+---
+
+# Tasks
+
+## Task 1: Understanding Missing Data Types (Conceptual)
+
+Answer the following questions based on the lecture material and your analysis:
+
+a) Define MCAR, MAR, and MNAR in your own words. Give an example of each from social science research.
+
+b) In this RLMS dataset, classify the missingness in the `income` variable. Is it MCAR, MAR, or MNAR? Justify your answer.
+
+c) Why is MNAR considered "non-ignorable" while MAR and MCAR are "ignorable"?
+
+**Your answers:**
+```{r task1}
+# Write your answers as comments here
+
+
+
+
+```
+
+---
+
+## Task 2: Exploring Missing Data Patterns
+
+a) Calculate the percentage of missing values for each variable in the `rlms1` dataset.
+
+b) Create a correlation matrix showing the relationship between missingness indicators for different variables. (Hint: Create binary indicators for missingness, then compute correlations)
+
+c) Based on your findings, which variables seem to have related missingness patterns? What might explain this?
+
+```{r task2}
+# Your code here
+
+
+
+
+```
+
+---
+
+## Task 3: Variable Type Specification
+
+a) Why is it important to specify variable types correctly before imputation? What could go wrong if you specify `income` as a regular continuous variable instead of positive-continuous?
+
+b) The `mi` package allows several variable types. List at least 4 different types and give an example of when you would use each.
+
+c) Check if there are any other variables in the dataset that might need type changes. Justify your choices.
+
+```{r task3}
+# Your code and answers here
+
+
+
+
+```
+
+---
+
+## Task 4: Convergence Diagnostics
+
+a) Run the multiple imputation with only 10 iterations instead of 30. Check the Rhat values. What do you observe?
+
+b) What is the purpose of running multiple chains in MI? What would happen if we only ran one chain?
+
+c) Create a plot showing how the mean of the imputed `income` variable changes across iterations for each chain. (Hint: You may need to extract iteration-level data or run MI step by step)
+
+```{r task4}
+# Your code here
+
+
+
+
+```
+
+
+
+# Summary
+
+In this workshop, we covered:
+
+1. **Diagnosing missing data** - Using `mi` package visualizations
+2. **Understanding structural missingness** - Filtering based on logical skip patterns
+3. **Multiple Imputation** - Using `mi` with MCMC and convergence checking
+4. **Random Forest Imputation** - Using `missForest` for non-parametric imputation
+5. **Comparing methods** - Evaluating different approaches
+
+**Key takeaways:**
+
+- Always diagnose missing data patterns before imputation
+- Correctly specify variable types
+- Check convergence for MI
+- Compare multiple methods when possible
+- Remember: imputed values are estimates, not truth!

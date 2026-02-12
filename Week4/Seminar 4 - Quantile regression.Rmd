@@ -1,0 +1,401 @@
+---
+title: "Seminar 4: Quantile Regression
+author: "Ilya Lyapin"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, 
+                      fig.width = 10, fig.height = 6)
+```
+
+# Introduction
+
+Ordinary Least Squares (OLS) regression models the **conditional mean** of the outcome variable. However, in many real-world scenarios, we may be interested in understanding how predictors affect different parts of the outcome distribution — not just the average.
+
+**Quantile regression** allows us to model any quantile (e.g., median, 10th percentile, 90th percentile) of the conditional distribution. This is particularly useful when:
+
+- Data contains outliers that disproportionately influence the mean
+- The outcome distribution is skewed or non-normal
+- We want to understand effects across the entire distribution (e.g., do wages increase more for high earners vs. low earners?)
+- Heteroscedasticity is present (variance differs across predictor values)
+
+# Required Packages
+
+```{r load-packages}
+library(tidyverse)
+library(quantreg)      # Core package for quantile regression
+library(sjPlot)        # Model visualization
+library(olsrr)         # OLS diagnostics
+library(performance)   # Model diagnostics
+library(ISLR)          # Wage dataset
+library(ggridges)      # Ridge plots
+library(gtsummary)     # Summary tables
+
+theme_set(theme_bw())
+```
+
+# Part 1: Motivation — Why Quantile Regression?
+
+## Creating Example Data with an Outlier
+
+Let's create a simple dataset where one observation is clearly an outlier.
+
+```{r example-data}
+d <- tibble(
+  predictor = c(  1,   2,   3,   4,   5,   6,   7),
+  outcome   = c(1.5, 2.3, 2.8, 4.1, 5.3,   0, 6.8)
+)
+
+print(d)
+```
+
+## Comparing OLS and Median Regression
+
+```{r compare-ols-median-plot}
+ggplot(d, aes(predictor, outcome)) +
+  geom_point(size = 3) +
+  geom_smooth(method = lm, se = FALSE, color = "red", linewidth = 1) +
+  geom_quantile(quantiles = 0.5, color = "blue", linewidth = 1) +
+  labs(
+    title = "OLS vs Median Regression",
+    subtitle = "Red = OLS (mean), Blue = Median regression",
+    x = "Predictor",
+    y = "Outcome"
+  ) +
+  annotate("text", x = 6, y = 0.5, label = "Outlier", color = "darkred")
+```
+
+**Key observation:** The linear model (OLS) tries to minimize squared errors for *all* points, so the outlier pulls the line toward it. Median regression is more robust — it effectively ignores the outlier and fits the majority of points better.
+
+## Fitting and Comparing Models
+
+```{r fit-example-models}
+# OLS regression
+lr <- lm(outcome ~ predictor, data = d)
+
+# Median regression (tau = 0.5)
+mr <- rq(outcome ~ predictor, data = d, tau = 0.5)
+
+# Compare AIC (lower is better)
+AIC(lr, mr)
+```
+
+```{r plot-example-coefficients}
+plot_models(lr, mr, 
+            show.values = TRUE, 
+            m.labels = c("Linear model", "Median model"), 
+            legend.title = "Model type") +
+  ggtitle("Coefficient Comparison: OLS vs Median Regression")
+```
+
+## Diagnosing the Outlier in OLS
+
+```{r ols-diagnostics}
+ols_plot_resid_lev(lr)
+```
+
+The plot clearly identifies the influential outlier.
+
+# Part 2: Real-World Example — Engel Food Expenditure Data
+
+The `engel` dataset from the `{quantreg}` package explores the relationship between household income and food expenditure.
+
+
+```{r engel-data}
+data(engel)
+head(engel)
+```
+
+## Visualizing Multiple Quantiles
+
+```{r engel-plot}
+ggplot(engel, aes(income, foodexp)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = lm, se = FALSE, color = "red", linewidth = 1) +
+  geom_quantile(color = "blue", quantiles = 0.5, linewidth = 1) +
+  geom_quantile(color = "gray", alpha = 0.5, 
+                quantiles = seq(0.05, 0.95, by = 0.05)) +
+  labs(
+    title = "Engel Food Expenditure Data",
+    subtitle = "Red = OLS, Blue = Median, Gray = Other quantiles (5% to 95%)",
+    x = "Household Income",
+    y = "Food Expenditure"
+  )
+```
+
+Notice how the quantile lines fan out — this indicates **heteroscedasticity** (variance increases with income).
+
+## Testing for Heteroscedasticity
+
+```{r engel-heteroscedasticity}
+lr_engel <- lm(foodexp ~ income, data = engel)
+check_heteroscedasticity(lr_engel)
+```
+
+```{r engel-model-comparison}
+qm50_engel <- rq(foodexp ~ income, data = engel, tau = 0.5)
+AIC(lr_engel, qm50_engel)
+```
+
+# Part 3: Categorical Predictors — Wage Data
+
+We'll use the `Wage` dataset from `{ISLR}` to compare salaries between Industrial and IT workers.
+
+## Small Sample Example
+
+```{r wage-sample}
+set.seed(1)
+salary <- Wage %>% 
+  group_by(jobclass) %>% 
+  sample_n(30)
+
+table(salary$jobclass)
+```
+
+### Model Diagnostics
+
+```{r wage-sample-diagnostics}
+lr_salary <- lm(wage ~ jobclass, data = salary)
+
+check_outliers(lr_salary)
+check_normality(lr_salary) 
+check_homogeneity(lr_salary)
+```
+
+### Comparing OLS and Median Regression
+
+```{r wage-sample-models}
+# OLS
+summary(lr_salary)
+set.seed(123)
+# Median regression
+mr_salary <- rq(wage ~ jobclass, data = salary, tau = 0.5) 
+summary(mr_salary, se = "boot")
+
+```
+
+```{r wage-sample-plot}
+plot_models(lr_salary, mr_salary, 
+            show.values = TRUE, 
+            m.labels = c("Linear model", "Median model"), 
+            legend.title = "Model type") +
+  ggtitle("Small Sample: IT vs Industrial Workers")
+```
+
+**Note:** Small samples can lead to unstable and contradictory results between methods.
+
+## Full Dataset Analysis
+
+```{r wage-full}
+lr_full <- lm(wage ~ jobclass, data = Wage)
+mr_full <- rq(wage ~ jobclass, data = Wage)
+
+plot_models(lr_full, mr_full, 
+            show.values = TRUE, 
+            m.labels = c("Linear model", "Median model"), 
+            legend.title = "Model type") +
+  ggtitle("Full Dataset: IT vs Industrial Workers")
+
+AIC(lr_full, mr_full)
+```
+
+# Part 4: Modeling Multiple Quantiles
+
+One of the most powerful features of quantile regression is the ability to model multiple quantiles simultaneously.
+
+## Visualizing Wage Distribution by Job Class
+
+```{r wage-ridge-plot}
+ggplot(Wage, aes(x = wage, y = jobclass, fill = factor(after_stat(quantile)))) +
+  stat_density_ridges(
+    geom = "density_ridges_gradient", 
+    calc_ecdf = TRUE,
+    quantile_lines = TRUE, 
+    quantiles = c(0.1, 0.5, 0.9)
+  ) +
+  scale_fill_viridis_d(name = "Quantiles") +
+  labs(x = "Salary", y = "Job Class", 
+       title = "Wage Distribution by Job Class")
+```
+
+## Comparing Effects Across Quantiles
+
+```{r multiple-quantiles}
+lr_wage   <- lm(wage ~ jobclass, data = Wage)
+qm10 <- rq(wage ~ jobclass, data = Wage, tau = 0.10)
+qm50 <- rq(wage ~ jobclass, data = Wage, tau = 0.50)
+qm90 <- rq(wage ~ jobclass, data = Wage, tau = 0.90)
+
+plot_models(lr_wage, qm10, qm50, qm90,
+            show.values = TRUE,
+            m.labels = c("OLS", "QR 10%", "QR 50%", "QR 90%"), 
+            legend.title = "Model type") +
+  ylab("IT Premium (compared to Industrial)") +
+  ggtitle("Effect of IT Job on Wages Across Quantiles")
+```
+
+**Interpretation:** Mean regression underestimates the IT premium for high earners (90th percentile) and overestimates it for low earners (10th percentile).
+
+## Extended Quantile Comparison
+
+```{r extended-quantiles}
+qm20 <- rq(wage ~ jobclass, data = Wage, tau = 0.20)
+qm30 <- rq(wage ~ jobclass, data = Wage, tau = 0.30)
+qm70 <- rq(wage ~ jobclass, data = Wage, tau = 0.70)
+qm80 <- rq(wage ~ jobclass, data = Wage, tau = 0.80)
+
+plot_models(lr_wage, qm10, qm20, qm30, qm50, qm70, qm80, qm90, 
+            show.values = TRUE) +
+  theme(legend.position = "none") +
+  ylab("IT Premium (compared to Industrial)") +
+  ggtitle("IT Effect Across Multiple Quantiles")
+```
+
+# Part 5: Quantile Process Plot
+
+We can visualize how the effect changes continuously across quantiles.
+
+```{r quantile-process}
+q_process <- rq(wage ~ jobclass, data = Wage, 
+                tau = seq(0.1, 0.9, by = 0.1))
+
+summary(q_process) %>% 
+  plot(parm = "jobclass2. Information")
+```
+
+**Reading the plot:**
+
+- The black line shows the quantile regression coefficients across quantiles
+- The shaded gray area represents confidence intervals for quantile estimates
+- The red dashed lines show the OLS estimate with its confidence interval
+- Where the gray and red regions don't overlap, the difference is statistically significant
+
+# Part 6: Multivariate Quantile Regression
+
+Quantile regression naturally extends to multiple predictors.
+
+```{r multivariate-models}
+l_multi <- lm(wage ~ jobclass + age + race, data = Wage)
+summary(l_multi)
+```
+
+```{r multivariate-quantile-process}
+q_multi <- rq(wage ~ jobclass + age + race, data = Wage, 
+              tau = seq(0.05, 0.95, by = 0.05))
+
+summary(q_multi) %>% 
+  plot(c("jobclass2. Information", "age", "race2. Black", "race3. Asian"))
+```
+
+## Summary Tables
+
+```{r summary-tables}
+q10_multi <- rq(wage ~ jobclass + age + race, data = Wage, tau = 0.1)
+q50_multi <- rq(wage ~ jobclass + age + race, data = Wage, tau = 0.5)
+q90_multi <- rq(wage ~ jobclass + age + race, data = Wage, tau = 0.9)
+
+tab_model(l_multi, q10_multi, q50_multi, q90_multi, 
+          dv.labels = c("OLS", "QR 10%", "QR 50%", "QR 90%"), 
+          show.r2 = FALSE)
+```
+
+# Part 7: Non-linear Quantile Regression
+
+For non-linear relationships, we can use penalized splines with the `{quantregGrowth}` package.
+
+```{r nonlinear-qr}
+library(quantregGrowth)
+
+set.seed(1)
+wage_sample <- Wage %>% sample_n(100)
+
+o <- gcrq(wage ~ ps(age), 
+          data = wage_sample, 
+          tau = seq(0.10, 0.90, length.out = 3))
+
+plot(o, legend = TRUE, conf.level = 0.95, shade = TRUE, 
+     lty = 1, lwd = 3, col = -1, res = TRUE)
+```
+
+# Summary
+
+| Aspect | OLS Regression | Quantile Regression |
+|--------|----------------|---------------------|
+| What it models | Conditional mean | Any conditional quantile |
+| Sensitivity to outliers | High | Low (especially median) |
+| Distributional assumptions | Normality often assumed | More flexible |
+| Heteroscedasticity | Problematic | Naturally accommodated |
+| Information provided | Single estimate | Full distributional picture |
+
+# Key Functions
+
+- `rq(formula, data, tau)` — fit quantile regression model
+- `tau` parameter specifies the quantile (0.5 = median, 0.1 = 10th percentile, etc.)
+- `summary(model, se = "boot")` — bootstrap standard errors (recommended for small samples)
+- Multiple quantiles: `tau = seq(0.1, 0.9, by = 0.1)`
+
+---
+
+# Student Tasks
+
+Complete the following exercises to reinforce your understanding of quantile regression.
+
+## Task 1: Conceptual Understanding
+
+Explain in your own words (3-4 sentences):
+
+a) Why might median regression be preferred over OLS when data contains outliers?
+b) What does it mean if the quantile regression coefficient at τ = 0.90 is larger than at τ = 0.10?
+
+## Task 2: Basic Application
+
+Using the `engel` dataset:
+
+1. Fit quantile regression models for the 25th, 50th, and 75th percentiles
+2. Compare the coefficients for `income` across these three models
+3. Interpret what the differences tell us about the relationship between income and food expenditure
+
+```{r task2-template, eval=FALSE}
+# Your code here
+data(engel)
+
+q25 <- rq(foodexp ~ income, data = engel, tau = ___)
+q50 <- rq(foodexp ~ income, data = engel, tau = ___)
+q75 <- rq(foodexp ~ income, data = engel, tau = ___)
+
+# Compare coefficients
+# ...
+```
+
+## Task 3: Applied Analysis
+
+Using the `Wage` dataset, investigate how the effect of `education` varies across the wage distribution:
+
+1. Fit OLS and quantile regression models (τ = 0.10, 0.50, 0.90) with `wage` as the outcome and `education` as the predictor
+2. Create a visualization comparing the coefficients
+3. Write a brief interpretation (4-5 sentences) of your findings
+
+## Task 4: Critical Thinking
+
+Consider a scenario where you're analyzing the effect of a job training program on earnings:
+
+- Why might policymakers be interested in quantile regression results rather than just OLS?
+- Which quantiles would be most policy-relevant, and why?
+- What limitations should you keep in mind when interpreting quantile regression results?
+
+---
+
+# References
+
+- Koenker, R. (2005). *Quantile Regression*. Cambridge University Press.
+- Original blog post: https://yuzar-blog.netlify.app/posts/2022-12-01-quantileregression/
+- `{quantreg}` package documentation: https://cran.r-project.org/package=quantreg
