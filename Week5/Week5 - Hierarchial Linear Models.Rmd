@@ -1,0 +1,326 @@
+---
+title: "Hierarchical Linear Models (HLM)"
+author: "Ilya Lyapin"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Data Preparation
+
+## Loading Libraries and Data
+
+```{r load-libraries}
+library(foreign)
+library(dplyr)
+```
+
+```{r load-data}
+sgp1 <- read.spss("BSGSGPM6.sav", to.data.frame = TRUE)
+
+sgp <- sgp1 %>% 
+  select(IDSCHOOL, IDSTUD, IDCLASS, BSMMAT01, ITSEX, BSBGSCM, BSBG04, BSBG07A, BSBG07B)
+
+lookup <- c(math = "BSMMAT01", IDCLASS = "IDCLASS", sex = "ITSEX", selfconf = "BSBGSCM", 
+            books = "BSBG04", edumom = "BSBG07A", edudad = "BSBG07B")
+sgp <- rename(sgp, all_of(lookup))
+names(sgp)
+```
+
+```{r initial-summary}
+summary(sgp)
+```
+
+## Variable Type Conversion
+
+```{r convert-types}
+# math, selfconf - numeric; others - factor
+sgp$math <- as.numeric(as.character(sgp$math))
+sgp$selfconf <- as.numeric(as.character(sgp$selfconf))
+sgp$books <- as.factor(sgp$books)
+sgp$edumom <- as.factor(sgp$edumom)
+sgp$edudad <- as.factor(sgp$edudad)
+```
+
+# Descriptive Statistics
+
+```{r descriptives-continuous}
+hist(sgp$selfconf)
+hist(sgp$math)
+```
+
+```{r descriptives-categorical}
+plot(sgp$books)
+plot(sgp$edumom)
+plot(sgp$edudad)
+plot(sgp$sex)
+```
+
+## Creating Parental Education Variable
+
+```{r create-paredu}
+# Recode "Don't know" to 0
+sgp$edudad <- ifelse(sgp$edudad == "Don't know", 0, sgp$edudad)
+sgp$edumom <- ifelse(sgp$edumom == "Don't know", 0, sgp$edumom)
+
+# Get highest education among 2 parents
+sgp$paredu <- pmax(as.numeric(sgp$edumom), as.numeric(sgp$edudad))
+table(sgp$paredu)
+
+# Set 0 to NA
+sgp$paredu <- ifelse(sgp$paredu == 0, NA, sgp$paredu)
+
+# Create binary: higher education yes/no
+sgp$paredu2 <- as.factor(ifelse(sgp$paredu < 5, 0, 1))
+table(sgp$paredu2, sgp$paredu)
+table(sgp$paredu2)
+```
+
+## Handling Missing Data
+
+```{r drop-na}
+sgp <- na.exclude(sgp)
+```
+
+---
+
+# Bivariate Tests
+
+```{r bivariate-paredu}
+t.test(sgp$selfconf ~ sgp$paredu2)
+boxplot(sgp$selfconf ~ sgp$paredu2)
+```
+
+```{r bivariate-sex}
+t.test(sgp$selfconf ~ sgp$sex)
+boxplot(sgp$selfconf ~ sgp$sex)
+```
+
+```{r bivariate-books}
+TukeyHSD(aov(sgp$selfconf ~ sgp$books))
+boxplot(sgp$selfconf ~ sgp$books)
+```
+
+```{r bivariate-math}
+cor.test(sgp$selfconf, sgp$math)
+scatter.smooth(sgp$selfconf, sgp$math)
+```
+
+```{r bivariate-viz}
+library(ggplot2)
+
+ggplot(sgp, aes(x = math, y = selfconf)) +
+  geom_smooth()
+
+ggplot(sgp, aes(x = math^3, y = selfconf)) +
+  geom_smooth()
+
+ggplot(sgp, aes(x = math, y = selfconf, color = sex)) +
+  geom_smooth()
+```
+
+---
+
+# Linear Regression (Single Level)
+
+```{r ols-models}
+mod01 <- lm(selfconf ~ sex, sgp)
+summary(mod01)
+
+mod02 <- lm(selfconf ~ sex + paredu2, sgp)
+summary(mod02)
+
+mod03 <- lm(selfconf ~ sex + paredu2 + books, sgp)
+summary(mod03)
+
+mod04 <- lm(selfconf ~ sex + paredu2 + books + math, sgp)
+summary(mod04)  # multicollinearity problem!
+
+mod05 <- lm(selfconf ~ sex + paredu2 + math, sgp)
+summary(mod05)  # keep this model
+```
+
+## Model Diagnostics
+
+```{r ols-diagnostics}
+library(lm.beta)
+lm.beta(mod05)
+
+car::vif(mod05)
+
+par(mfrow = c(2, 2))
+plot(mod05)
+```
+
+```{r polynomial}
+mod05.1 <- lm(selfconf ~ sex + paredu2 + poly(math, 3), sgp)
+summary(mod05.1)
+```
+
+---
+
+# Why Multilevel?
+
+```{r check-classes}
+summary(lm(selfconf ~ sex + paredu2 + math + IDCLASS, sgp))
+# Significant class effects => multilevel analysis needed
+```
+
+---
+
+# Hierarchical Linear Models
+
+## Step 1: Single-Level Null Model
+
+self_conf = B0 + E 
+
+```{r null-single}
+fit <- lm(selfconf ~ 1, data = sgp)
+summary(fit)
+logLik(fit)
+```
+
+## Step 2: Two-Level Null Model
+
+self_confident_ij = Y_oo + U_oj + E_ij
+
+```{r null-multilevel}
+library(lme4)
+
+nullmodel <- lmer(selfconf ~ (1 | IDCLASS), data = sgp, REML = FALSE)
+summary(nullmodel)
+logLik(nullmodel)
+```
+
+## Comparing Null Models
+
+```{r compare-null}
+# Likelihood ratio test
+# 2*(logLik(nullmodel) - logLik(fit))
+2 * (-13352.27 - -13265.95)  # = 172.64 on 1 d.f.
+# Chi-squared critical value on 1 d.f. = 3.84
+# 172.64 > 3.84 => adding 2nd level is justified
+```
+
+## Intraclass Correlation (ICC)
+
+```{r icc}
+performance::icc(nullmodel)
+
+# Manual calculation:
+# Between-classes variance (Level 2) = IDCLASS (Intercept) = 0.3529
+# Within-class variance (Level 1) = Residual = 4.3511
+# Total variance = 0.3529 + 4.3511 = 4.704
+# ICC = 0.3529 / 4.704 = 7.5%
+```
+
+---
+
+## Step 3: Random Intercept Model with Level-1 Predictors
+
+```{r hlm-level1}
+mod2 <- lmer(selfconf ~ sex + paredu2 + math + (1 | IDCLASS), data = sgp, REML = FALSE)
+summary(mod2)
+```
+
+```{r rescale-math}
+# Rescale math for better interpretation
+sgp$math1 <- sgp$math / 100
+
+mod2 <- lmer(selfconf ~ sex + paredu2 + math1 + (1 | IDCLASS), data = sgp, REML = FALSE)
+summary(mod2)
+```
+
+## Step 4: Adding Level-2 Predictor
+
+```{r hlm-level2}
+# Create class-level variable: average math achievement
+sgp$mathAVG <- ave(sgp$math1, sgp$IDCLASS)
+
+mod3 <- lmer(selfconf ~ sex + paredu2 + math1 + mathAVG + (1 | IDCLASS), data = sgp, REML = FALSE)
+summary(mod3)
+```
+
+## Step 5: Random Slope Model
+
+```{r random-slope}
+mod4 <- lmer(selfconf ~ sex + paredu2 + math1 + mathAVG + (1 + math1 | IDCLASS), data = sgp, REML = FALSE)
+summary(mod4)
+
+anova(mod3, mod4)  # Insignificant => no random effect of math
+```
+
+## Model Comparison and Visualization
+
+```{r hlm-viz}
+library(sjPlot)
+tab_model(mod3, mod4)
+plot_model(mod3, type = "pred")
+```
+
+---
+
+
+
+# Student Tasks
+
+## Task 1: Explore the Nesting Structure
+
+How many students are in each class? What is the average class size? Are class sizes balanced?
+
+```{r task1}
+# YOUR CODE HERE
+
+```
+
+## Task 2: Test Additional Random Slopes
+
+Test whether the effect of `sex` or `paredu2` varies across classes. Compare models using `anova()`.
+
+```{r task2}
+# YOUR CODE HERE
+
+```
+
+## Task 3: Create Another Level-2 Variable
+
+Create a class-level variable for the proportion of students with highly educated parents. Add it to the model and interpret.
+
+```{r task3}
+# YOUR CODE HERE
+
+```
+
+## Task 4: Model Comparison
+
+Compare all models (mod2, mod3, mod4) using AIC and BIC. Which model would you choose?
+
+```{r task4}
+# YOUR CODE HERE
+
+```
+
+## Task 5: Visualize Random Effects
+
+Use `ranef()` to extract random intercepts for each class. Create a plot showing the distribution of class-level intercepts.
+
+```{r task5}
+# YOUR CODE HERE
+
+```
+
+---
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
